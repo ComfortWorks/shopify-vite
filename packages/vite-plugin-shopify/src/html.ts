@@ -12,6 +12,35 @@ import type { TunnelClient } from '@shopify/cli-kit/node/plugins/tunnel'
 
 const debug = createDebugger('vite-plugin-shopify:html')
 
+function shouldExcludeEntry(src, excludeExtensions, excludePaths) {
+  // Normalize the source path
+  const normalizedSrc = normalizePath3(src);
+  
+  // Check if extension matches any excluded extension
+  if (excludeExtensions.length > 0) {
+    const ext = path4.extname(normalizedSrc);
+    if (excludeExtensions.some(excludedExt => {
+      // Ensure extension starts with a dot
+      const normalizedExcludedExt = excludedExt.startsWith('.') ? excludedExt : `.${excludedExt}`;
+      return ext === normalizedExcludedExt;
+    })) {
+      return true;
+    }
+  }
+  
+  // Check if path matches any excluded path pattern
+  if (excludePaths.length > 0) {
+    if (excludePaths.some(excludedPath => {
+      const normalizedExcludedPath = normalizePath3(excludedPath);
+      return normalizedSrc.includes(normalizedExcludedPath);
+    })) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 // Plugin for generating vite-tag liquid theme snippet with entry points for JS and CSS assets
 export default function shopifyHTML (options: Required<Options>): Plugin {
   let config: ResolvedConfig
@@ -124,6 +153,12 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         return
       }
 
+      // ADD DEBUG LOGGING (optional)
+      debug('Processing manifest with exclusions:', {
+        excludeExtensions: options.excludeExtensions,
+        excludePaths: options.excludePaths
+      });
+
       const assetTags: string[] = []
       const manifest = JSON.parse(
         fs.readFileSync(manifestFilePath, 'utf8')
@@ -131,6 +166,12 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
 
       Object.keys(manifest).forEach((src) => {
         const { file, isEntry, css, imports } = manifest[src]
+
+        if (shouldExcludeEntry(src, options.excludeExtensions, options.excludePaths)) {
+          debug(`Excluding entry: ${src}`);
+          return; // Skip this entry
+        }
+        
         const ext = path.extname(src)
 
         // Generate tags for JS and CSS entry points
