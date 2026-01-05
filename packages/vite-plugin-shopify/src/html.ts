@@ -14,11 +14,11 @@ const debug = createDebugger('vite-plugin-shopify:html')
 
 function shouldExcludeEntry(src, excludeExtensions, excludePaths) {
   // Normalize the source path
-  const normalizedSrc = normalizePath3(src);
+  const normalizedSrc = normalizePath(src);
   
   // Check if extension matches any excluded extension
   if (excludeExtensions.length > 0) {
-    const ext = path4.extname(normalizedSrc);
+    const ext = path.extname(normalizedSrc);
     if (excludeExtensions.some(excludedExt => {
       // Ensure extension starts with a dot
       const normalizedExcludedExt = excludedExt.startsWith('.') ? excludedExt : `.${excludedExt}`;
@@ -31,7 +31,7 @@ function shouldExcludeEntry(src, excludeExtensions, excludePaths) {
   // Check if path matches any excluded path pattern
   if (excludePaths.length > 0) {
     if (excludePaths.some(excludedPath => {
-      const normalizedExcludedPath = normalizePath3(excludedPath);
+      const normalizedExcludedPath = normalizePath(excludedPath);
       return normalizedSrc.includes(normalizedExcludedPath);
     })) {
       return true;
