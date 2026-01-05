@@ -1,5 +1,5 @@
 {
-  "name": "vite-plugin-shopify",
+  "name": "@comfortworks/vite-plugin-shopify",
   "version": "4.1.1",
   "description": "Vite plugin providing integration for Shopify themes",
   "type": "module",
