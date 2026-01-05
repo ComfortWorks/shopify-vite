@@ -13,6 +13,8 @@ export const resolveOptions = (
   const versionNumbers = options.versionNumbers ?? false
   const tunnel = options.tunnel ?? false
   const themeHotReload = options.themeHotReload ?? true
+  const excludeExtensions = options.excludeExtensions ?? [];
+  const excludePaths = options.excludePaths ?? [];
 
   return {
     themeRoot,
@@ -22,6 +24,8 @@ export const resolveOptions = (
     snippetFile,
     versionNumbers,
     tunnel,
-    themeHotReload
+    themeHotReload,
+    excludeExtensions,
+    excludePaths
   }
 }
