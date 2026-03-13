@@ -191,6 +191,8 @@ By default, the plugin generates standard render-blocking tags for all productio
 
 The `assetLoading` option lets you override the loading behaviour of specific output files, giving you fine-grained control over which assets are render-blocking and which are deferred.
 
+> **Important:** All Vite/Rollup output uses ES module syntax (`import`/`export`), so `type="module"` is always preserved on script tags. ES module scripts are deferred by the browser by spec — this is handled automatically.
+
 ### Configuration
 
 `assetLoading` accepts an array of rules. Each rule has a `match` pattern and a `strategy`. The **first matching rule wins** — subsequent matches are ignored.
@@ -198,10 +200,14 @@ The `assetLoading` option lets you override the loading behaviour of specific ou
 ```js
 shopify({
   assetLoading: [
-    { match: /^\d+\.min\.js$/,    strategy: 'defer' },
-    { match: 'icons-*.min.js',    strategy: 'defer' },
-    { match: /^\d+\.min\.css$/,   strategy: 'preload' },
-    { match: 'icons-*.min.css',   strategy: 'preload' },
+    // Lazy-load icon chunks — only execute when dynamically imported
+    { match: 'icons-*.min.js', strategy: 'lazy' },
+    // Async-load numbered chunk JS
+    { match: /^\d+\.min\.js$/, strategy: 'async' },
+    // Non-blocking CSS for numbered chunks
+    { match: /^\d+\.min\.css$/, strategy: 'preload' },
+    // Non-blocking CSS for icon chunks
+    { match: 'icons-*.min.css', strategy: 'preload' },
   ]
 })
 ```
@@ -220,13 +226,16 @@ Patterns are tested against the **output filename** (e.g. `icons-shared.min.js`,
 
 #### JavaScript strategies
 
+All JS strategies preserve `type="module"` since Vite/Rollup always outputs ES module syntax.
+
 | Strategy | Output | Behaviour |
 |---|---|---|
-| *(default)* | `<script type="module">` | Standard ES module, render-blocking |
-| `'defer'` | `<script defer>` | Downloaded in parallel, executed after HTML parsing |
-| `'async'` | `<script async>` | Downloaded in parallel, executed as soon as available |
+| *(default)* | `<script type="module">` | Standard ES module, deferred by spec |
+| `'defer'` | `<script type="module">` | Same as default — ES modules are already deferred. Semantic alias for readability. |
+| `'async'` | `<script type="module" async>` | Non-blocking, executes as soon as available. Overrides the default defer behaviour of modules. |
+| `'lazy'` | *(no `<script>` tag)* | Only a `<link rel="modulepreload">` hint is emitted. The chunk is preloaded by the browser but only executes when dynamically imported at runtime by its consuming section. Best for code-split chunks that aren't needed on initial load. |
 
-When `defer` or `async` is applied, associated preload hints are also adjusted from `<link rel="modulepreload">` to `<link rel="preload" as="script">` to match the non-module loading behaviour.
+The `lazy` strategy is ideal for chunks that are pulled in by other modules (e.g. icon category chunks imported by section components). The browser preloads the file so it's ready in the cache, but no JavaScript executes until the parent module requests it — giving you the best of both worlds: fast availability without blocking.
 
 #### CSS strategies
 
@@ -235,7 +244,8 @@ When `defer` or `async` is applied, associated preload hints are also adjusted f
 | *(default)* | `stylesheet_tag` | Standard Shopify stylesheet tag, render-blocking |
 | `'preload'` | `media="print" onload` swap | Non-render-blocking, swaps to `all` once loaded |
 | `'defer'` | Same as `'preload'` | Alias for convenience |
-| `'async'` | Same as `'preload'` | Alias for convenience |
+| `'lazy'` | Same as `'preload'` | Alias for convenience |
+| `'async'` | Same as `'preload'` | Alias for convenience (CSS has no native async) |
 
 The non-render-blocking CSS pattern uses `media="print"` with an `onload="this.media='all'"` swap, which is the most reliable technique across browsers. A `<noscript>` fallback is included for accessibility:
 
@@ -246,7 +256,7 @@ The non-render-blocking CSS pattern uses `media="print"` with an `onload="this.m
 
 ### Example: Optimising a Shopify theme with chunked icons
 
-A typical setup where icon chunks and numbered Rollup chunks are deferred, while critical entry points load normally:
+A typical setup where icon chunks are lazy-loaded, numbered Rollup chunks are async, and critical entry points load normally:
 
 ```js
 import shopify from 'vite-plugin-shopify'
@@ -260,11 +270,12 @@ export default {
       excludeExtensions: ['.vue', '.tsx', '.jsx'],
       excludePaths: ['snippets/icons/'],
       assetLoading: [
-        // Defer all numbered chunk JS (Rollup code-split output)
-        { match: /^\d+\.min\.js$/, strategy: 'defer' },
+        // Lazy-load icon category chunks — preloaded but only
+        // execute when their consuming section dynamically imports them
+        { match: 'icons-*.min.js', strategy: 'lazy' },
 
-        // Defer all icon category chunks
-        { match: 'icons-*.min.js', strategy: 'defer' },
+        // Async-load numbered chunk JS (Rollup code-split output)
+        { match: /^\d+\.min\.js$/, strategy: 'async' },
 
         // Non-blocking CSS for numbered chunks
         { match: /^\d+\.min\.css$/, strategy: 'preload' },
@@ -277,7 +288,7 @@ export default {
 }
 ```
 
-This ensures only critical entry points (e.g. `themeJsComponent.min.js`, `theme.min.css`) are render-blocking, while secondary chunks load without impacting FCP or LCP.
+This ensures only critical entry points (e.g. `themeJsComponent.min.js`, `theme.min.css`) are render-blocking, while secondary chunks either execute on-demand (`lazy`) or as soon as available without blocking (`async`).
 
 ### Debugging
 
@@ -290,8 +301,8 @@ DEBUG=vite-plugin-shopify:html pnpm build
 This outputs lines like:
 
 ```
-[assetLoading] Matched 42.min.js via RegExp → defer
-[assetLoading] Matched icons-shared.min.js via glob "icons-*.min.js" → defer
+[assetLoading] Matched icons-shared.min.js via glob "icons-*.min.js" → lazy
+[assetLoading] Matched 42.min.js via RegExp → async
 [assetLoading] Matched 42.min.css via RegExp → preload
 ```
 
@@ -318,7 +329,7 @@ This outputs lines like:
 | Property | Type | Description |
 |---|---|---|
 | `match` | `string \| RegExp` | Pattern to match against output filename (supports RegExp, glob `*`, or exact string) |
-| `strategy` | `'defer' \| 'async' \| 'preload'` | Loading strategy to apply |
+| `strategy` | `'defer' \| 'async' \| 'preload' \| 'lazy'` | Loading strategy to apply |
 
 ---
 

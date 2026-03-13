@@ -244,7 +244,10 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
           } else {
             // Render script tag for JS entry — check for loading strategy override
             const jsStrategy = matchAssetLoadingRule(file, options.assetLoading)
-            tagsForEntry.push(scriptTag(file, options.versionNumbers, jsStrategy))
+            const jsTag = scriptTag(file, options.versionNumbers, jsStrategy)
+            if (jsTag !== '') {
+              tagsForEntry.push(jsTag)
+            }
 
             if (typeof imports !== 'undefined' && imports.length > 0) {
               imports.forEach((importFilename: string) => {
@@ -255,8 +258,8 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
                 const chunkStrategy = matchAssetLoadingRule(chunk.file, options.assetLoading)
 
                 if (config.build.modulePreload !== false) {
-                  // Render preload tags for JS imports
-                  tagsForEntry.push(preloadScriptTag(chunk.file, options.versionNumbers, chunkStrategy))
+                  // Render modulepreload hint for JS imports
+                  tagsForEntry.push(preloadScriptTag(chunk.file, options.versionNumbers))
                 }
 
                 // Render style tag for JS imports
@@ -339,40 +342,42 @@ const viteEntryTag = (entryPaths: string[], tag: string, isFirstEntry = false): 
   `{% ${!isFirstEntry ? 'els' : ''}if ${entryPaths.map((entryName) => `path == "${entryName}"`).join(' or ')} %}\n  ${tag}`
 
 /**
- * Generate a preload link tag for a script asset.
+ * Generate a modulepreload link tag for a script asset.
  *
- * When strategy is 'defer' or 'async', emits a standard preload hint
- * instead of modulepreload (since the script won't be loaded as a module).
+ * All Vite/Rollup output is ES module format, so modulepreload is always
+ * the correct hint type regardless of loading strategy.
  *
  * @param {string} fileName - Output asset filename
  * @param {boolean} versionNumbers - Whether to append version numbers
- * @param {string|null} strategy - Loading strategy override
  * @returns {string} Liquid/HTML tag string
  */
 const preloadScriptTag = (
   fileName: string,
-  versionNumbers: boolean,
-  strategy: AssetLoadingRule['strategy'] | null = null
+  versionNumbers: boolean
 ): string => {
-  if (strategy === 'defer' || strategy === 'async') {
-    // Non-module scripts use standard preload instead of modulepreload
-    return `<link rel="preload" href="{{ ${assetUrl(fileName, versionNumbers)} }}" as="script" crossorigin="anonymous">`
-  }
   return `<link rel="modulepreload" href="{{ ${assetUrl(fileName, versionNumbers)} }}" crossorigin="anonymous">`
 }
 
 /**
  * Generate a production script tag for a JS asset.
  *
- * Supports loading strategy overrides:
- * - null (default) → `<script type="module" crossorigin="anonymous">`
- * - 'defer'        → `<script defer crossorigin="anonymous">`
- * - 'async'        → `<script async crossorigin="anonymous">`
+ * All Vite/Rollup output uses ES module syntax (import/export),
+ * so `type="module"` is always required. ES module scripts are
+ * deferred by spec, so `defer` is a no-op — kept as an alias
+ * for semantic clarity in config.
+ *
+ * Supported strategies:
+ * - null (default) → `<script type="module">` (standard, deferred by spec)
+ * - 'defer'        → Same as default (ES modules are already deferred)
+ * - 'async'        → `<script type="module" async>` (non-blocking, runs ASAP)
+ * - 'lazy'         → Returns empty string. No `<script>` tag emitted.
+ *                     The chunk is only fetched via `<link rel="modulepreload">`
+ *                     and executes when dynamically imported at runtime.
  *
  * @param {string} fileName - Output asset filename
  * @param {boolean} versionNumbers - Whether to append version numbers
  * @param {string|null} strategy - Loading strategy override
- * @returns {string} Liquid/HTML tag string
+ * @returns {string} Liquid/HTML tag string, or empty string for 'lazy'
  */
 const scriptTag = (
   fileName: string,
@@ -382,11 +387,15 @@ const scriptTag = (
   const url = `{{ ${assetUrl(fileName, versionNumbers)} }}`
 
   switch (strategy) {
-    case 'defer':
-      return `<script src="${url}" defer crossorigin="anonymous"></script>`
+    case 'lazy':
+      // No script tag — chunk is modulepreloaded and executes
+      // only when dynamically imported by its consuming section
+      return ''
     case 'async':
-      return `<script src="${url}" async crossorigin="anonymous"></script>`
+      return `<script src="${url}" type="module" async crossorigin="anonymous"></script>`
+    case 'defer':
     default:
+      // ES modules are deferred by spec — no extra attribute needed
       return `<script src="${url}" type="module" crossorigin="anonymous"></script>`
   }
 }
@@ -395,10 +404,10 @@ const scriptTag = (
  * Generate a production stylesheet tag for a CSS asset.
  *
  * Supports loading strategy overrides:
- * - null (default)       → Blocking `stylesheet_tag` (Shopify default)
- * - 'preload' or 'defer' → Non-render-blocking via `media="print"` + `onload` swap.
- *                           Includes `<noscript>` fallback for accessibility.
- * - 'async'              → Same as 'preload' (CSS has no native async)
+ * - null (default)                       → Blocking `stylesheet_tag` (Shopify default)
+ * - 'preload', 'defer', 'lazy', 'async' → Non-render-blocking via
+ *                                          `media="print"` + `onload` swap.
+ *                                          Includes `<noscript>` fallback for accessibility.
  *
  * The `media="print" onload` technique is the most reliable non-blocking
  * CSS pattern across browsers and works within Shopify's Liquid environment
@@ -414,7 +423,7 @@ const stylesheetTag = (
   versionNumbers: boolean,
   strategy: AssetLoadingRule['strategy'] | null = null
 ): string => {
-  if (strategy === 'preload' || strategy === 'defer' || strategy === 'async') {
+  if (strategy === 'preload' || strategy === 'defer' || strategy === 'async' || strategy === 'lazy') {
     // Non-render-blocking CSS via media="print" onload swap
     // See: https://web.dev/defer-non-critical-css/
     const url = `{{ ${assetUrl(fileName, versionNumbers)} }}`

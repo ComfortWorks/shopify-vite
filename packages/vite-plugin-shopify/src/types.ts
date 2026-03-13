@@ -83,10 +83,15 @@ export interface Options {
    * - Plain `string` — exact filename match
    *
    * Strategies:
-   * - **JS `'defer'`** — `<script src="..." defer></script>` (non-module, deferred)
-   * - **JS `'async'`** — `<script src="..." async></script>` (non-blocking, runs ASAP)
+   * - **JS `'async'`**   — `<script type="module" async>` (non-blocking, runs ASAP)
+   * - **JS `'lazy'`**    — Only emits `<link rel="modulepreload">` hint, no `<script>` tag.
+   *                         The chunk executes only when dynamically imported at runtime.
+   * - **JS `'defer'`**   — Same as default (ES modules are deferred by spec).
+   *                         Kept as a semantic alias for readability.
    * - **CSS `'preload'`** — Non-render-blocking via `media="print"` + `onload` swap
-   * - **CSS `'defer'`** — Alias for `'preload'` (semantic convenience)
+   * - **CSS `'defer'`**  — Alias for `'preload'` (semantic convenience)
+   * - **CSS `'lazy'`**   — Alias for `'preload'` (semantic convenience)
+   * - **CSS `'async'`**  — Alias for `'preload'` (CSS has no native async)
    *
    * First matching rule wins. Assets with no matching rule use the default
    * loading strategy (`type="module"` for JS, blocking `stylesheet_tag` for CSS).
@@ -97,10 +102,10 @@ export interface Options {
    * ```ts
    * viteShopify({
    *   assetLoading: [
-   *     // Defer all numbered chunk JS files
-   *     { match: /^\d+\.min\.js$/, strategy: 'defer' },
-   *     // Defer all icon chunk JS files
-   *     { match: 'icons-*.min.js', strategy: 'defer' },
+   *     // Lazy-load icon chunks — only fetched when section renders
+   *     { match: 'icons-*.min.js', strategy: 'lazy' },
+   *     // Async-load numbered chunk JS files
+   *     { match: /^\d+\.min\.js$/, strategy: 'async' },
    *     // Non-blocking CSS for numbered chunks
    *     { match: /^\d+\.min\.css$/, strategy: 'preload' },
    *   ]
@@ -126,11 +131,12 @@ export interface AssetLoadingRule {
   /**
    * Loading strategy to apply when the pattern matches.
    *
-   * - `'defer'` — JS: `<script defer>`, CSS: non-render-blocking preload
-   * - `'async'` — JS: `<script async>`, CSS: non-render-blocking preload
+   * - `'async'`   — JS: `<script type="module" async>`, CSS: non-render-blocking preload
+   * - `'lazy'`    — JS: modulepreload hint only (no script tag), CSS: non-render-blocking preload
+   * - `'defer'`   — JS: default (modules are deferred by spec), CSS: non-render-blocking preload
    * - `'preload'` — CSS: non-render-blocking via `media="print"` + `onload` swap
    */
-  strategy: 'defer' | 'async' | 'preload'
+  strategy: 'defer' | 'async' | 'preload' | 'lazy'
 }
 
 export type DevServerUrl = `${'http' | 'https'}://${string}:${number}`
