@@ -7,12 +7,12 @@ import startTunnel from '@shopify/plugin-cloudflare/hooks/tunnel'
 import { renderInfo, isTTY } from '@shopify/cli-kit/node/ui'
 
 import { CSS_EXTENSIONS_REGEX, KNOWN_CSS_EXTENSIONS, hotReloadScriptId, hotReloadScriptUrl } from './constants'
-import type { Options, DevServerUrl, FrontendURLResult } from './types'
+import type { Options, AssetLoadingRule, DevServerUrl, FrontendURLResult } from './types'
 import type { TunnelClient } from '@shopify/cli-kit/node/plugins/tunnel'
 
 const debug = createDebugger('vite-plugin-shopify:html')
 
-function shouldExcludeEntry(src, excludeExtensions, excludePaths) {
+function shouldExcludeEntry(src: string, excludeExtensions: string[], excludePaths: string[]): boolean {
   // Normalize the source path
   const normalizedSrc = normalizePath(src);
   
@@ -39,6 +39,62 @@ function shouldExcludeEntry(src, excludeExtensions, excludePaths) {
   }
   
   return false;
+}
+
+/**
+ * Convert a glob-style pattern string to a RegExp.
+ * Supports `*` as a wildcard for any characters (except path separators).
+ *
+ * @param {string} pattern - Glob pattern (e.g. 'icons-*.min.js')
+ * @returns {RegExp}
+ */
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // Escape regex special chars
+    .replace(/\*/g, '[^/]*')                // Replace * with non-greedy wildcard
+  return new RegExp(`^${escaped}$`)
+}
+
+/**
+ * Match an output filename against the assetLoading rules.
+ * Returns the strategy of the first matching rule, or null if no rule matches.
+ *
+ * Matching order:
+ * 1. RegExp — tested directly against the filename
+ * 2. String with `*` — converted to glob-style regex
+ * 3. Plain string — exact filename match
+ *
+ * @param {string} fileName - Output asset filename (e.g. 'icons-shared.min.js')
+ * @param {AssetLoadingRule[]} rules - Array of loading rules from options
+ * @returns {string|null} The matched strategy or null
+ */
+function matchAssetLoadingRule(
+  fileName: string,
+  rules: AssetLoadingRule[]
+): AssetLoadingRule['strategy'] | null {
+  for (const rule of rules) {
+    if (rule.match instanceof RegExp) {
+      if (rule.match.test(fileName)) {
+        debug(`[assetLoading] Matched ${fileName} via RegExp → ${rule.strategy}`)
+        return rule.strategy
+      }
+    } else if (typeof rule.match === 'string') {
+      if (rule.match.includes('*')) {
+        // Glob-style wildcard match
+        if (globToRegExp(rule.match).test(fileName)) {
+          debug(`[assetLoading] Matched ${fileName} via glob "${rule.match}" → ${rule.strategy}`)
+          return rule.strategy
+        }
+      } else {
+        // Exact filename match
+        if (fileName === rule.match) {
+          debug(`[assetLoading] Matched ${fileName} via exact → ${rule.strategy}`)
+          return rule.strategy
+        }
+      }
+    }
+  }
+  return null
 }
 
 // Plugin for generating vite-tag liquid theme snippet with entry points for JS and CSS assets
@@ -153,11 +209,12 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         return
       }
 
-      // ADD DEBUG LOGGING (optional)
       debug('Processing manifest with exclusions:', {
         excludeExtensions: options.excludeExtensions,
         excludePaths: options.excludePaths
-      });
+      })
+
+      debug('Asset loading rules:', options.assetLoading)
 
       const assetTags: string[] = []
       const manifest = JSON.parse(
@@ -168,8 +225,8 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         const { file, isEntry, css, imports } = manifest[src]
 
         if (shouldExcludeEntry(src, options.excludeExtensions, options.excludePaths)) {
-          debug(`Excluding entry: ${src}`);
-          return; // Skip this entry
+          debug(`Excluding entry: ${src}`)
+          return
         }
         
         const ext = path.extname(src)
@@ -178,29 +235,35 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         if (isEntry === true) {
           const entryName = normalizePath(path.relative(options.entrypointsDir, src))
           const entryPaths = [`/${src}`, entryName]
-          const tagsForEntry = []
+          const tagsForEntry: string[] = []
 
           if (ext.match(CSS_EXTENSIONS_REGEX) !== null) {
-            // Render style tag for CSS entry
-            tagsForEntry.push(stylesheetTag(file, options.versionNumbers))
+            // Render style tag for CSS entry — check for loading strategy override
+            const strategy = matchAssetLoadingRule(file, options.assetLoading)
+            tagsForEntry.push(stylesheetTag(file, options.versionNumbers, strategy))
           } else {
-            // Render script tag for JS entry
-            tagsForEntry.push(scriptTag(file, options.versionNumbers))
+            // Render script tag for JS entry — check for loading strategy override
+            const jsStrategy = matchAssetLoadingRule(file, options.assetLoading)
+            tagsForEntry.push(scriptTag(file, options.versionNumbers, jsStrategy))
 
             if (typeof imports !== 'undefined' && imports.length > 0) {
               imports.forEach((importFilename: string) => {
                 const chunk = manifest[importFilename]
-                const { css } = chunk
+                const { css: chunkCss } = chunk
+
+                // Check loading strategy for the imported chunk
+                const chunkStrategy = matchAssetLoadingRule(chunk.file, options.assetLoading)
+
                 if (config.build.modulePreload !== false) {
                   // Render preload tags for JS imports
-                  tagsForEntry.push(preloadScriptTag(chunk.file, options.versionNumbers))
+                  tagsForEntry.push(preloadScriptTag(chunk.file, options.versionNumbers, chunkStrategy))
                 }
 
                 // Render style tag for JS imports
-                if (typeof css !== 'undefined' && css.length > 0) {
-                  css.forEach((cssFileName: string) => {
-                    // Render style tag for imported CSS file
-                    tagsForEntry.push(stylesheetTag(cssFileName, options.versionNumbers))
+                if (typeof chunkCss !== 'undefined' && chunkCss.length > 0) {
+                  chunkCss.forEach((cssFileName: string) => {
+                    const cssStrategy = matchAssetLoadingRule(cssFileName, options.assetLoading)
+                    tagsForEntry.push(stylesheetTag(cssFileName, options.versionNumbers, cssStrategy))
                   })
                 }
               })
@@ -208,8 +271,8 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
 
             if (typeof css !== 'undefined' && css.length > 0) {
               css.forEach((cssFileName: string) => {
-                // Render style tag for imported CSS file
-                tagsForEntry.push(stylesheetTag(cssFileName, options.versionNumbers))
+                const cssStrategy = matchAssetLoadingRule(cssFileName, options.assetLoading)
+                tagsForEntry.push(stylesheetTag(cssFileName, options.versionNumbers, cssStrategy))
               })
             }
           }
@@ -219,7 +282,8 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
 
         // Generate entry tag for bundled "style.css" file when cssCodeSplit is false
         if (src === 'style.css' && !config.build.cssCodeSplit) {
-          assetTags.push(viteEntryTag([src], stylesheetTag(file, options.versionNumbers), false))
+          const strategy = matchAssetLoadingRule(file, options.assetLoading)
+          assetTags.push(viteEntryTag([src], stylesheetTag(file, options.versionNumbers, strategy), false))
         }
       })
 
@@ -274,17 +338,93 @@ const assetUrl = (fileName: string, versionNumbers: boolean): string => {
 const viteEntryTag = (entryPaths: string[], tag: string, isFirstEntry = false): string =>
   `{% ${!isFirstEntry ? 'els' : ''}if ${entryPaths.map((entryName) => `path == "${entryName}"`).join(' or ')} %}\n  ${tag}`
 
-// Generate a preload link tag for a script or style asset
-const preloadScriptTag = (fileName: string, versionNumbers: boolean): string =>
-  `<link rel="modulepreload" href="{{ ${assetUrl(fileName, versionNumbers)} }}" crossorigin="anonymous">`
+/**
+ * Generate a preload link tag for a script asset.
+ *
+ * When strategy is 'defer' or 'async', emits a standard preload hint
+ * instead of modulepreload (since the script won't be loaded as a module).
+ *
+ * @param {string} fileName - Output asset filename
+ * @param {boolean} versionNumbers - Whether to append version numbers
+ * @param {string|null} strategy - Loading strategy override
+ * @returns {string} Liquid/HTML tag string
+ */
+const preloadScriptTag = (
+  fileName: string,
+  versionNumbers: boolean,
+  strategy: AssetLoadingRule['strategy'] | null = null
+): string => {
+  if (strategy === 'defer' || strategy === 'async') {
+    // Non-module scripts use standard preload instead of modulepreload
+    return `<link rel="preload" href="{{ ${assetUrl(fileName, versionNumbers)} }}" as="script" crossorigin="anonymous">`
+  }
+  return `<link rel="modulepreload" href="{{ ${assetUrl(fileName, versionNumbers)} }}" crossorigin="anonymous">`
+}
 
-// Generate a production script tag for a script asset
-const scriptTag = (fileName: string, versionNumbers: boolean): string =>
-  `<script src="{{ ${assetUrl(fileName, versionNumbers)} }}" type="module" crossorigin="anonymous"></script>`
+/**
+ * Generate a production script tag for a JS asset.
+ *
+ * Supports loading strategy overrides:
+ * - null (default) → `<script type="module" crossorigin="anonymous">`
+ * - 'defer'        → `<script defer crossorigin="anonymous">`
+ * - 'async'        → `<script async crossorigin="anonymous">`
+ *
+ * @param {string} fileName - Output asset filename
+ * @param {boolean} versionNumbers - Whether to append version numbers
+ * @param {string|null} strategy - Loading strategy override
+ * @returns {string} Liquid/HTML tag string
+ */
+const scriptTag = (
+  fileName: string,
+  versionNumbers: boolean,
+  strategy: AssetLoadingRule['strategy'] | null = null
+): string => {
+  const url = `{{ ${assetUrl(fileName, versionNumbers)} }}`
 
-// Generate a production stylesheet link tag for a style asset
-const stylesheetTag = (fileName: string, versionNumbers: boolean): string =>
-  `{{ ${assetUrl(fileName, versionNumbers)} | stylesheet_tag: preload: preload_stylesheet }}`
+  switch (strategy) {
+    case 'defer':
+      return `<script src="${url}" defer crossorigin="anonymous"></script>`
+    case 'async':
+      return `<script src="${url}" async crossorigin="anonymous"></script>`
+    default:
+      return `<script src="${url}" type="module" crossorigin="anonymous"></script>`
+  }
+}
+
+/**
+ * Generate a production stylesheet tag for a CSS asset.
+ *
+ * Supports loading strategy overrides:
+ * - null (default)       → Blocking `stylesheet_tag` (Shopify default)
+ * - 'preload' or 'defer' → Non-render-blocking via `media="print"` + `onload` swap.
+ *                           Includes `<noscript>` fallback for accessibility.
+ * - 'async'              → Same as 'preload' (CSS has no native async)
+ *
+ * The `media="print" onload` technique is the most reliable non-blocking
+ * CSS pattern across browsers and works within Shopify's Liquid environment
+ * without requiring inline JavaScript.
+ *
+ * @param {string} fileName - Output asset filename
+ * @param {boolean} versionNumbers - Whether to append version numbers
+ * @param {string|null} strategy - Loading strategy override
+ * @returns {string} Liquid/HTML tag string
+ */
+const stylesheetTag = (
+  fileName: string,
+  versionNumbers: boolean,
+  strategy: AssetLoadingRule['strategy'] | null = null
+): string => {
+  if (strategy === 'preload' || strategy === 'defer' || strategy === 'async') {
+    // Non-render-blocking CSS via media="print" onload swap
+    // See: https://web.dev/defer-non-critical-css/
+    const url = `{{ ${assetUrl(fileName, versionNumbers)} }}`
+    return (
+      `<link rel="stylesheet" href="${url}" media="print" onload="this.media='all'" crossorigin="anonymous">` +
+      `\n  <noscript><link rel="stylesheet" href="${url}" crossorigin="anonymous"></noscript>`
+    )
+  }
+  return `{{ ${assetUrl(fileName, versionNumbers)} | stylesheet_tag: preload: preload_stylesheet }}`
+}
 
 // Generate vite-tag snippet for development
 const viteTagSnippetDev = (assetHost: string, entrypointsDir: string, reactPlugin: Plugin | undefined, themeHotReload: boolean): string =>
@@ -383,7 +523,7 @@ async function pollTunnelUrl (tunnelClient: TunnelClient): Promise<string> {
       const result = tunnelClient.getTunnelStatus()
       debug(`Polling tunnel status for ${tunnelClient.provider} (attempt ${retries}): ${result.status}`)
       if (result.status === 'error') {
-        return reject(result.message) // Changed AbortError to standard Error
+        return reject(result.message)
       }
       if (result.status === 'connected') {
         resolve(result.url)

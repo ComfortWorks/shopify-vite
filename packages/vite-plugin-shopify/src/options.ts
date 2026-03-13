@@ -13,8 +13,9 @@ export const resolveOptions = (
   const versionNumbers = options.versionNumbers ?? false
   const tunnel = options.tunnel ?? false
   const themeHotReload = options.themeHotReload ?? true
-  const excludeExtensions = options.excludeExtensions ?? [];
-  const excludePaths = options.excludePaths ?? [];
+  const excludeExtensions = options.excludeExtensions ?? []
+  const excludePaths = options.excludePaths ?? []
+  const assetLoading = options.assetLoading ?? []
 
   return {
     themeRoot,
@@ -26,6 +27,7 @@ export const resolveOptions = (
     tunnel,
     themeHotReload,
     excludeExtensions,
-    excludePaths
+    excludePaths,
+    assetLoading
   }
 }
