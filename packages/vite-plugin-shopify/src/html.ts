@@ -59,11 +59,6 @@ function globToRegExp(pattern: string): RegExp {
  * Match an output filename against the assetLoading rules.
  * Returns the strategy of the first matching rule, or null if no rule matches.
  *
- * Matching order:
- * 1. RegExp — tested directly against the filename
- * 2. String with `*` — converted to glob-style regex
- * 3. Plain string — exact filename match
- *
  * @param {string} fileName - Output asset filename (e.g. 'icons-shared.min.js')
  * @param {AssetLoadingRule[]} rules - Array of loading rules from options
  * @returns {string|null} The matched strategy or null
@@ -80,13 +75,11 @@ function matchAssetLoadingRule(
       }
     } else if (typeof rule.match === 'string') {
       if (rule.match.includes('*')) {
-        // Glob-style wildcard match
         if (globToRegExp(rule.match).test(fileName)) {
           debug(`[assetLoading] Matched ${fileName} via glob "${rule.match}" → ${rule.strategy}`)
           return rule.strategy
         }
       } else {
-        // Exact filename match
         if (fileName === rule.match) {
           debug(`[assetLoading] Matched ${fileName} via exact → ${rule.strategy}`)
           return rule.strategy
@@ -95,6 +88,107 @@ function matchAssetLoadingRule(
     }
   }
   return null
+}
+
+/**
+ * Get the byte length of a string (UTF-8).
+ *
+ * @param {string} str
+ * @returns {number}
+ */
+function byteLength(str: string): number {
+  return Buffer.byteLength(str, 'utf8')
+}
+
+/**
+ * Split an array of asset tag blocks into groups that each fit
+ * within the given byte budget when assembled into a liquid snippet.
+ *
+ * Each group is turned into its own complete if/elsif/endif block.
+ *
+ * @param {string[]} assetTags - Array of entry tag blocks
+ * @param {number} maxBytes - Max byte size per sub-snippet
+ * @param {string} disclaimer - Disclaimer comment to prepend to each sub-snippet
+ * @returns {string[][]} Array of tag groups
+ */
+function splitAssetTagsIntoGroups(
+  assetTags: string[],
+  maxBytes: number,
+  disclaimer: string
+): string[][] {
+  const groups: string[][] = []
+  let currentGroup: string[] = []
+  // Overhead per sub-snippet: disclaimer + {% endif %} + newlines
+  const overhead = byteLength(disclaimer) + byteLength('\n{% endif %}\n') + 50
+
+  let currentSize = overhead
+
+  for (const tag of assetTags) {
+    const tagSize = byteLength(tag) + 1 // +1 for newline separator
+
+    if (currentGroup.length > 0 && (currentSize + tagSize) > maxBytes) {
+      // Current group is full — start a new one
+      groups.push(currentGroup)
+      currentGroup = []
+      currentSize = overhead
+    }
+
+    currentGroup.push(tag)
+    currentSize += tagSize
+  }
+
+  // Push remaining
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup)
+  }
+
+  return groups
+}
+
+/**
+ * Convert a group of asset tag blocks into a complete liquid sub-snippet.
+ *
+ * The first tag in the group may start with `{% elsif` (from the main
+ * generation loop), which needs to be rewritten to `{% if` since each
+ * sub-snippet is its own independent conditional block.
+ *
+ * @param {string[]} tags - Asset tag blocks for this group
+ * @param {string} disclaimer - Disclaimer comment
+ * @returns {string} Complete liquid snippet content
+ */
+function assembleSubSnippet(tags: string[], disclaimer: string): string {
+  const rewritten = tags.map((tag, index) => {
+    if (index === 0) {
+      // Ensure the first tag starts with {% if, not {% elsif
+      return tag.replace(/^\{% elsif /, '{% if ')
+    }
+    return tag
+  })
+
+  return disclaimer + rewritten.join('\n') + '\n{% endif %}\n'
+}
+
+/**
+ * Remove stale sub-snippet files from previous builds.
+ *
+ * Cleans up files matching `{baseName}-{n}.liquid` in the snippets directory.
+ *
+ * @param {string} snippetsDir - Path to the snippets directory
+ * @param {string} baseName - Base snippet name (e.g. 'vite-tag')
+ */
+function cleanupStaleSubSnippets(snippetsDir: string, baseName: string): void {
+  if (!fs.existsSync(snippetsDir)) return
+
+  const files = fs.readdirSync(snippetsDir)
+  const pattern = new RegExp(`^${baseName}-\\d+\\.liquid$`)
+
+  files.forEach((file) => {
+    if (pattern.test(file)) {
+      const filePath = path.resolve(snippetsDir, file)
+      fs.unlinkSync(filePath)
+      debug(`[snippet-chunking] Deleted stale sub-snippet: ${file}`)
+    }
+  })
 }
 
 // Plugin for generating vite-tag liquid theme snippet with entry points for JS and CSS assets
@@ -106,6 +200,7 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
 
   const viteTagSnippetPath = path.resolve(options.themeRoot, `snippets/${options.snippetFile}`)
   const viteTagSnippetName = options.snippetFile.replace(/\.[^.]+$/, '')
+  const snippetsDir = path.resolve(options.themeRoot, 'snippets')
   const viteTagSnippetPrefix = (config: ResolvedConfig): string =>
     viteTagDisclaimer + viteTagEntryPath(config.resolve.alias, options.entrypointsDir, viteTagSnippetName)
 
@@ -113,7 +208,6 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
     name: 'vite-plugin-shopify-html',
     enforce: 'post',
     configResolved (resolvedConfig) {
-      // Store reference to resolved config
       config = resolvedConfig
     },
     transform (code) {
@@ -161,7 +255,6 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
                 tunnelUrl, options.entrypointsDir, reactPlugin, options.themeHotReload
               )
 
-              // Write vite-tag with a Cloudflare Tunnel URL
               fs.writeFileSync(viteTagSnippetPath, viteTagSnippetContent)
             })()
           }, 100)
@@ -172,7 +265,9 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
               : viteDevServerUrl, options.entrypointsDir, reactPlugin, options.themeHotReload
           )
 
-          // Write vite-tag snippet for development server
+          // Clean up any stale sub-snippets from previous production builds
+          cleanupStaleSubSnippets(snippetsDir, viteTagSnippetName)
+
           fs.writeFileSync(viteTagSnippetPath, viteTagSnippetContent)
         }
       })
@@ -181,7 +276,6 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         tunnelClient?.stopTunnel()
       })
 
-      // Serve the dev-server-index.html page
       return () => middlewares.use((req, res, next) => {
         if (req.url === '/index.html') {
           res.statusCode = 404
@@ -215,6 +309,7 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
       })
 
       debug('Asset loading rules:', options.assetLoading)
+      debug('Snippet max size:', options.snippetMaxSize)
 
       const assetTags: string[] = []
       const manifest = JSON.parse(
@@ -231,18 +326,15 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
         
         const ext = path.extname(src)
 
-        // Generate tags for JS and CSS entry points
         if (isEntry === true) {
           const entryName = normalizePath(path.relative(options.entrypointsDir, src))
           const entryPaths = [`/${src}`, entryName]
           const tagsForEntry: string[] = []
 
           if (ext.match(CSS_EXTENSIONS_REGEX) !== null) {
-            // Render style tag for CSS entry — check for loading strategy override
             const strategy = matchAssetLoadingRule(file, options.assetLoading)
             tagsForEntry.push(stylesheetTag(file, options.versionNumbers, strategy))
           } else {
-            // Render script tag for JS entry — check for loading strategy override
             const jsStrategy = matchAssetLoadingRule(file, options.assetLoading)
             const jsTag = scriptTag(file, options.versionNumbers, jsStrategy)
             if (jsTag !== '') {
@@ -254,15 +346,10 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
                 const chunk = manifest[importFilename]
                 const { css: chunkCss } = chunk
 
-                // Check loading strategy for the imported chunk
-                const chunkStrategy = matchAssetLoadingRule(chunk.file, options.assetLoading)
-
                 if (config.build.modulePreload !== false) {
-                  // Render modulepreload hint for JS imports
                   tagsForEntry.push(preloadScriptTag(chunk.file, options.versionNumbers))
                 }
 
-                // Render style tag for JS imports
                 if (typeof chunkCss !== 'undefined' && chunkCss.length > 0) {
                   chunkCss.forEach((cssFileName: string) => {
                     const cssStrategy = matchAssetLoadingRule(cssFileName, options.assetLoading)
@@ -283,22 +370,71 @@ export default function shopifyHTML (options: Required<Options>): Plugin {
           assetTags.push(viteEntryTag(entryPaths, tagsForEntry.join('\n  '), assetTags.length === 0))
         }
 
-        // Generate entry tag for bundled "style.css" file when cssCodeSplit is false
         if (src === 'style.css' && !config.build.cssCodeSplit) {
           const strategy = matchAssetLoadingRule(file, options.assetLoading)
           assetTags.push(viteEntryTag([src], stylesheetTag(file, options.versionNumbers, strategy), false))
         }
       })
 
-      const viteTagSnippetContent = viteTagSnippetPrefix(config) + assetTags.join('\n') + '\n{% endif %}\n'
+      // ── Clean up stale sub-snippets from previous builds ─────────────────
+      cleanupStaleSubSnippets(snippetsDir, viteTagSnippetName)
 
-      // Write vite-tag snippet for production build
-      fs.writeFileSync(viteTagSnippetPath, viteTagSnippetContent)
+      // ── Build the full snippet content ───────────────────────────────────
+      const prefix = viteTagSnippetPrefix(config)
+      const fullContent = prefix + assetTags.join('\n') + '\n{% endif %}\n'
+      const fullSize = byteLength(fullContent)
+
+      // ── Check if splitting is needed ─────────────────────────────────────
+      if (options.snippetMaxSize > 0 && fullSize > options.snippetMaxSize) {
+        debug(`[snippet-chunking] Snippet size ${(fullSize / 1024).toFixed(1)}KB exceeds limit ${(options.snippetMaxSize / 1024).toFixed(1)}KB — splitting`)
+
+        // Calculate byte budget per sub-snippet
+        // Leave room for the main snippet's render tags
+        const subSnippetMaxSize = options.snippetMaxSize - 512 // 512B headroom
+
+        const groups = splitAssetTagsIntoGroups(assetTags, subSnippetMaxSize, viteTagSubSnippetDisclaimer)
+
+        // Write each sub-snippet
+        groups.forEach((group, index) => {
+          const subSnippetName = `${viteTagSnippetName}-${index}`
+          const subSnippetPath = path.resolve(snippetsDir, `${subSnippetName}.liquid`)
+          const subSnippetContent = assembleSubSnippet(group, viteTagSubSnippetDisclaimer)
+
+          fs.writeFileSync(subSnippetPath, subSnippetContent)
+
+          const subSize = byteLength(subSnippetContent)
+          debug(`[snippet-chunking] Wrote ${subSnippetName}.liquid (${(subSize / 1024).toFixed(1)}KB, ${group.length} entries)`)
+        })
+
+        // Build the main delegator snippet
+        const renderTags = groups.map((_, index) => {
+          const subSnippetName = `${viteTagSnippetName}-${index}`
+          return `{% render '${subSnippetName}', path: path, preload_stylesheet: preload_stylesheet %}`
+        }).join('\n')
+
+        const mainContent = prefix + renderTags + '\n'
+
+        fs.writeFileSync(viteTagSnippetPath, mainContent)
+
+        const mainSize = byteLength(mainContent)
+        console.log(
+          `[snippet-chunking] Split vite-tag into ${groups.length} sub-snippets ` +
+          `(main: ${(mainSize / 1024).toFixed(1)}KB, ` +
+          `original would have been: ${(fullSize / 1024).toFixed(1)}KB)`
+        )
+      } else {
+        // Single file — no splitting needed
+        fs.writeFileSync(viteTagSnippetPath, fullContent)
+
+        debug(`[snippet-chunking] Snippet size ${(fullSize / 1024).toFixed(1)}KB — within limit, no split needed`)
+      }
     }
   }
 }
 
 const viteTagDisclaimer = '{% comment %}\n  IMPORTANT: This snippet is automatically generated by vite-plugin-shopify.\n  Do not attempt to modify this file directly, as any changes will be overwritten by the next build.\n{% endcomment %}\n'
+
+const viteTagSubSnippetDisclaimer = '{% comment %}\n  Auto-generated sub-snippet. Do not edit — overwritten on every build.\n  See the main vite-tag.liquid for usage.\n{% endcomment %}\n'
 
 // Generate liquid variable with resolved path by replacing aliases
 const viteTagEntryPath = (
@@ -314,14 +450,12 @@ const viteTagEntryPath = (
     }
   })
 
-  // Support both 'entry' (new, strict parser) and snippetName (old, backward compat)
-  const paramName = 'entry' // Fixed semantic name for new syntax
+  const paramName = 'entry'
 
   const replaceChain = replacements
     .map(([from, to]) => `replace: '${from}/', '${to}/'`)
     .join(' | ')
 
-  // Generate liquid that uses default filter for backward compatibility
   return `{% liquid
   assign ${paramName} = ${paramName} | default: ${snippetName}
   assign path = ${paramName}${replaceChain ? ' | ' + replaceChain : ''}
@@ -329,7 +463,6 @@ const viteTagEntryPath = (
 `
 }
 
-// Generate the asset's url with or without version numbers
 const assetUrl = (fileName: string, versionNumbers: boolean): string => {
   if (!versionNumbers) {
     return `'${fileName}' | asset_url | split: '?' | first`
@@ -337,19 +470,11 @@ const assetUrl = (fileName: string, versionNumbers: boolean): string => {
   return `'${fileName}' | asset_url`
 }
 
-// Generate conditional statement for entry tag
 const viteEntryTag = (entryPaths: string[], tag: string, isFirstEntry = false): string =>
   `{% ${!isFirstEntry ? 'els' : ''}if ${entryPaths.map((entryName) => `path == "${entryName}"`).join(' or ')} %}\n  ${tag}`
 
 /**
  * Generate a modulepreload link tag for a script asset.
- *
- * All Vite/Rollup output is ES module format, so modulepreload is always
- * the correct hint type regardless of loading strategy.
- *
- * @param {string} fileName - Output asset filename
- * @param {boolean} versionNumbers - Whether to append version numbers
- * @returns {string} Liquid/HTML tag string
  */
 const preloadScriptTag = (
   fileName: string,
@@ -361,23 +486,10 @@ const preloadScriptTag = (
 /**
  * Generate a production script tag for a JS asset.
  *
- * All Vite/Rollup output uses ES module syntax (import/export),
- * so `type="module"` is always required. ES module scripts are
- * deferred by spec, so `defer` is a no-op — kept as an alias
- * for semantic clarity in config.
- *
- * Supported strategies:
- * - null (default) → `<script type="module">` (standard, deferred by spec)
- * - 'defer'        → Same as default (ES modules are already deferred)
- * - 'async'        → `<script type="module" async>` (non-blocking, runs ASAP)
- * - 'lazy'         → Returns empty string. No `<script>` tag emitted.
- *                     The chunk is only fetched via `<link rel="modulepreload">`
- *                     and executes when dynamically imported at runtime.
- *
- * @param {string} fileName - Output asset filename
- * @param {boolean} versionNumbers - Whether to append version numbers
- * @param {string|null} strategy - Loading strategy override
- * @returns {string} Liquid/HTML tag string, or empty string for 'lazy'
+ * - null (default) → `<script type="module">`
+ * - 'defer'        → Same as default (ES modules are deferred by spec)
+ * - 'async'        → `<script type="module" async>`
+ * - 'lazy'         → Returns empty string (no script tag)
  */
 const scriptTag = (
   fileName: string,
@@ -388,14 +500,11 @@ const scriptTag = (
 
   switch (strategy) {
     case 'lazy':
-      // No script tag — chunk is modulepreloaded and executes
-      // only when dynamically imported by its consuming section
       return ''
     case 'async':
       return `<script src="${url}" type="module" async crossorigin="anonymous"></script>`
     case 'defer':
     default:
-      // ES modules are deferred by spec — no extra attribute needed
       return `<script src="${url}" type="module" crossorigin="anonymous"></script>`
   }
 }
@@ -403,20 +512,8 @@ const scriptTag = (
 /**
  * Generate a production stylesheet tag for a CSS asset.
  *
- * Supports loading strategy overrides:
- * - null (default)                       → Blocking `stylesheet_tag` (Shopify default)
- * - 'preload', 'defer', 'lazy', 'async' → Non-render-blocking via
- *                                          `media="print"` + `onload` swap.
- *                                          Includes `<noscript>` fallback for accessibility.
- *
- * The `media="print" onload` technique is the most reliable non-blocking
- * CSS pattern across browsers and works within Shopify's Liquid environment
- * without requiring inline JavaScript.
- *
- * @param {string} fileName - Output asset filename
- * @param {boolean} versionNumbers - Whether to append version numbers
- * @param {string|null} strategy - Loading strategy override
- * @returns {string} Liquid/HTML tag string
+ * - null (default)                       → Blocking stylesheet_tag
+ * - 'preload', 'defer', 'lazy', 'async' → Non-render-blocking media swap
  */
 const stylesheetTag = (
   fileName: string,
@@ -424,8 +521,6 @@ const stylesheetTag = (
   strategy: AssetLoadingRule['strategy'] | null = null
 ): string => {
   if (strategy === 'preload' || strategy === 'defer' || strategy === 'async' || strategy === 'lazy') {
-    // Non-render-blocking CSS via media="print" onload swap
-    // See: https://web.dev/defer-non-critical-css/
     const url = `{{ ${assetUrl(fileName, versionNumbers)} }}`
     return (
       `<link rel="stylesheet" href="${url}" media="print" onload="this.media='all'" crossorigin="anonymous">` +
@@ -469,9 +564,6 @@ const viteTagSnippetDev = (assetHost: string, entrypointsDir: string, reactPlugi
 {% endif %}
 `
 
-/**
- * Resolve the dev server URL from the server address and configuration.
- */
 function resolveDevServerUrl (address: AddressInfo, config: ResolvedConfig): DevServerUrl {
   const configHmrProtocol = typeof config.server.hmr === 'object' ? config.server.hmr.protocol : null
   const clientProtocol = configHmrProtocol ? (configHmrProtocol === 'wss' ? 'https' : 'http') : null
@@ -491,19 +583,11 @@ function resolveDevServerUrl (address: AddressInfo, config: ResolvedConfig): Dev
 
 function isIpv6 (address: AddressInfo): boolean {
   return address.family === 'IPv6' ||
-    // In node >=18.0 <18.4 this was an integer value. This was changed in a minor version.
-    // See: https://github.com/laravel/vite-plugin/issues/103
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-expect-error-next-line
     address.family === 6
 }
 
-/**
- * The tunnel creation logic depends on the tunnel option:
- * - If tunnel is false, uses localhost
- * - If tunnel is a string (custom URL), uses that URL
- * - If tunnel is true, a tunnel is created (by default using cloudflare)
- */
 function generateFrontendURL (options: Required<Options>): FrontendURLResult {
   const frontendPort = -1
   let frontendUrl = ''
@@ -522,9 +606,6 @@ function generateFrontendURL (options: Required<Options>): FrontendURLResult {
   return { frontendUrl, frontendPort, usingLocalhost }
 }
 
-/**
- * Poll the tunnel provider every 0.5 until an URL or error is returned.
- */
 async function pollTunnelUrl (tunnelClient: TunnelClient): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     let retries = 0

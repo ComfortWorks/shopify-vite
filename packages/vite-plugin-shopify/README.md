@@ -308,6 +308,76 @@ This outputs lines like:
 
 ---
 
+## Snippet chunking
+
+Shopify imposes a **256KB file size limit** on liquid snippets. When a project has many entry points — each with multiple script, preload, and stylesheet tags — the generated `vite-tag.liquid` can exceed this limit.
+
+The plugin automatically handles this by splitting the snippet into smaller sub-files when the content exceeds `snippetMaxSize`.
+
+### How it works
+
+When splitting is triggered:
+
+1. The if/elsif entry-matching logic is divided into numbered sub-snippets (`vite-tag-0.liquid`, `vite-tag-1.liquid`, etc.)
+2. The main `vite-tag.liquid` handles path resolution (alias replacement) once, then delegates to each sub-snippet via `{% render %}`
+3. Each sub-snippet receives the resolved `path` and `preload_stylesheet` variables
+
+The generated structure looks like:
+
+```
+theme/snippets/
+├── vite-tag.liquid       ← Main: path resolution + render delegates
+├── vite-tag-0.liquid     ← Sub-snippet: entries 1–N
+├── vite-tag-1.liquid     ← Sub-snippet: entries N+1–M
+└── ...
+```
+
+**Main snippet** (`vite-tag.liquid`):
+```liquid
+{% comment %}...auto-generated{% endcomment %}
+{% liquid
+  assign entry = entry | default: vite-tag
+  assign path = entry | replace: ...
+%}
+{% render 'vite-tag-0', path: path, preload_stylesheet: preload_stylesheet %}
+{% render 'vite-tag-1', path: path, preload_stylesheet: preload_stylesheet %}
+```
+
+**Sub-snippet** (`vite-tag-0.liquid`):
+```liquid
+{% comment %}...auto-generated{% endcomment %}
+{% if path == "/src/modules/layout/theme/themeJsComponent.js" or path == "layout/theme/themeJsComponent.js" %}
+  <script src="..." type="module" crossorigin="anonymous"></script>
+{% elsif path == "..." %}
+  ...
+{% endif %}
+```
+
+### Configuration
+
+```js
+shopify({
+  // Default: 200KB (leaves ~56KB headroom below Shopify's 256KB limit)
+  snippetMaxSize: 200 * 1024,
+
+  // Or set a lower threshold for extra safety
+  snippetMaxSize: 150 * 1024,
+
+  // Set to 0 to disable splitting (not recommended)
+  snippetMaxSize: 0,
+})
+```
+
+If the snippet is under the limit, a single `vite-tag.liquid` is generated as normal — no sub-snippets are created.
+
+Stale sub-snippets from previous builds are automatically cleaned up on each build and dev server start.
+
+### No changes to your Liquid templates
+
+The `{% render 'vite-tag', entry: '...' %}` call in your theme layout stays exactly the same regardless of whether splitting is active.
+
+---
+
 ## Options reference
 
 | Option | Type | Default | Description |
@@ -323,6 +393,7 @@ This outputs lines like:
 | `excludeExtensions` | `string[]` | `[]` | File extensions to exclude from entry generation |
 | `excludePaths` | `string[]` | `[]` | Path patterns to exclude from entry generation |
 | `assetLoading` | `AssetLoadingRule[]` | `[]` | Per-file loading strategy overrides |
+| `snippetMaxSize` | `number` | `204800` (200KB) | Max bytes per snippet file before auto-splitting |
 
 ### `AssetLoadingRule`
 

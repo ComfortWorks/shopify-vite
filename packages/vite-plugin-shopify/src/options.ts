@@ -16,6 +16,7 @@ export const resolveOptions = (
   const excludeExtensions = options.excludeExtensions ?? []
   const excludePaths = options.excludePaths ?? []
   const assetLoading = options.assetLoading ?? []
+  const snippetMaxSize = options.snippetMaxSize ?? (200 * 1024) // 200KB default
 
   return {
     themeRoot,
@@ -28,6 +29,7 @@ export const resolveOptions = (
     themeHotReload,
     excludeExtensions,
     excludePaths,
-    assetLoading
+    assetLoading,
+    snippetMaxSize
   }
 }

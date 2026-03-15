@@ -113,6 +113,34 @@ export interface Options {
    * ```
    */
   assetLoading?: AssetLoadingRule[]
+
+  /**
+   * Maximum size in bytes for the generated vite-tag snippet file.
+   *
+   * Shopify imposes a 256KB file size limit on liquid snippets.
+   * When the generated vite-tag content exceeds this threshold,
+   * the plugin automatically splits the if/elsif entry matching
+   * logic into numbered sub-snippets (`vite-tag-0.liquid`,
+   * `vite-tag-1.liquid`, etc.) and generates a main `vite-tag.liquid`
+   * that delegates to each via `{% render %}`.
+   *
+   * The path resolution (alias replacement) stays in the main snippet.
+   * Sub-snippets receive the resolved `path` variable directly.
+   *
+   * Set to `0` to disable splitting (not recommended if you have
+   * many entry points).
+   *
+   * @default 204800 (200KB — leaves ~56KB headroom below Shopify's 256KB limit)
+   *
+   * @example
+   * ```ts
+   * viteShopify({
+   *   // Split at 150KB for extra headroom
+   *   snippetMaxSize: 150 * 1024,
+   * })
+   * ```
+   */
+  snippetMaxSize?: number
 }
 
 /**
